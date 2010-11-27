@@ -1,0 +1,271 @@
+/*=========================================================================
+ 
+   Copyright 2010, Dr. Sandra Black
+   Linda C. Campbell Cognitive Neurology Unit
+   Sunnybrook Health Sciences Center
+
+   This file is part of ITK-SNAP -SB
+
+   ITK-SNAP-SB is free software: you can redistribute it and/or modify
+   it under the terms of the GNU General Public License as published by
+   the Free Software Foundation, either version 3 of the License, or
+   (at your option) any later version.
+
+   This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU General Public License for more details.
+
+   You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+   ------
+
+  Program:   ITK-SNAP
+  Module:    $RCSfile: PolygonScanConvert.cxx,v $
+  Language:  C++
+  Date:      $Date: 2009/01/23 20:09:38 $
+  Version:   $Revision: 1.8 $
+  Copyright (c) 2007 Paul A. Yushkevich
+  
+  This file is part of ITK-SNAP 
+
+  ITK-SNAP is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+ 
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+  -----
+
+  Copyright (c) 2003 Insight Software Consortium. All rights reserved.
+  See ITKCopyright.txt or http://www.itk.org/HTML/Copyright.htm for details.
+
+  This software is distributed WITHOUT ANY WARRANTY; without even
+  the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+  PURPOSE.  See the above copyright notices for more information. 
+
+=========================================================================*/
+#include "PolygonScanConvert.h"
+#include "SNAPCommon.h"
+#include "itkOrientedImage.h"
+
+#include <iostream>
+
+// Typecast for the callback functions
+#ifdef WIN32
+typedef void (CALLBACK *TessCallback)();
+#elif defined (__APPL__)
+typedef GLvoid (*TessCallback)(...);
+#else
+typedef void (*TessCallback)();
+#endif
+
+void PolygonScanConvertBase
+::GetPointsForFilledPoly( double* vArray, unsigned int nVertices )
+{
+  // Start the tesselation
+  GLUtesselator *tess = gluNewTess();
+  gluTessCallback(tess,(GLenum) GLU_TESS_VERTEX, (TessCallback) &glVertex3dv);
+  gluTessCallback(tess,(GLenum) GLU_TESS_BEGIN, (TessCallback) &glBegin); 
+  gluTessCallback(tess,(GLenum) GLU_TESS_END, (TessCallback) &glEnd);
+  gluTessCallback(tess,(GLenum) GLU_TESS_ERROR, (TessCallback) &PolygonScanConvertBase::ErrorCallback);     
+  gluTessCallback(tess,(GLenum) GLU_TESS_COMBINE, (TessCallback) &PolygonScanConvertBase::CombineCallback);
+  gluTessProperty(tess,(GLenum) GLU_TESS_WINDING_RULE, GLU_TESS_WINDING_NONZERO);  
+  gluTessNormal(tess,0.0,0.0,1.0);
+
+  // Start the tesselation
+  gluTessBeginPolygon(tess,NULL);
+  gluTessBeginContour(tess);
+
+  // Add the vertices
+  for(unsigned int i=0; i < nVertices; i++)
+      gluTessVertex(tess, vArray + 3*i, vArray + 3*i); 
+
+  // End the tesselation
+  gluTessEndContour(tess);
+  gluTessEndPolygon(tess);
+
+  // Delete the tesselator
+  gluDeleteTess(tess);
+
+}
+
+void PolygonScanConvertBase
+::GetPointsForUnfilledPoly( double* vArray, unsigned int nVertices )
+{
+  glPointSize( 1.0f ); 
+  glBegin( GL_POINTS );
+ 
+  for ( int i=0; i < (nVertices-1)*3; i+=3 )
+    DrawLine( vArray[i], vArray[i+1], vArray[i+3], vArray[i+4] );
+
+  glEnd();
+}
+
+void PolygonScanConvertBase
+::DrawLine( double x0, double y0, double x1, double y1 )
+{
+  bool steep = std::abs(y1-y0) > std::abs(x1-x0);
+  if ( steep )
+  {
+    std::swap(x0,y0);
+    std::swap(x1,y1);
+  }
+  if ( x0 > x1 )
+  {
+    std::swap(x0,x1);
+    std::swap(y0,y1);
+  }
+  int deltax = x1 - x0;
+  int deltay = std::abs(y1-y0);
+  int error = deltax / 2;
+  int ystep;
+  int y = y0;
+  if ( y0 < y1 )
+    ystep = 1;
+  else
+    ystep = -1;
+
+  for ( int x=x0; x<x1; ++x )
+  {
+    if ( steep )
+    {
+      glVertex3d( y, x, 0.0f);
+    }
+    else
+    {
+      glVertex3d( x, y, 0.0f );
+    }
+    error = error - deltay;
+    if ( error < 0 )
+    {
+      y = y + ystep;
+      error = error + deltax;
+    }
+  }
+}
+
+void PolygonScanConvertBase
+::DrawRasterized( unsigned int width, unsigned int height, GLenum glType, void *buffer, GLint* dl )
+{
+
+  // Draw polygon into back buffer - back buffer should get redrawn
+  // anyway before it gets swapped to the screen.
+  glDrawBuffer(GL_BACK);
+  glReadBuffer(GL_BACK);
+
+  // We will perform a tiled drawing, because the backbuffer may be smaller
+  // than the size of the image. First get the viewport size, i.e., tile size
+  GLint xViewport[4]; glGetIntegerv(GL_VIEWPORT, xViewport);
+  unsigned int wTile = (unsigned int) xViewport[2];
+  unsigned int hTile = (unsigned int) xViewport[3];
+
+  // Figure out the number of tiles in x and y dimension
+  unsigned int nTilesX = (unsigned int) ceil( width * 1.0 / wTile );
+  unsigned int nTilesY = (unsigned int) ceil( height * 1.0 / hTile );
+
+  // Draw and retrieve each tile
+  for(unsigned int iTileX = 0; iTileX < nTilesX; iTileX++)
+    {
+    for(unsigned int iTileY = 0; iTileY < nTilesY; iTileY++)
+      {
+      // Get the corner of the tile
+      unsigned int xTile = iTileX * wTile, yTile = iTileY * hTile;
+
+      // Set the projection matrix
+      glMatrixMode(GL_PROJECTION);
+      glPushMatrix();
+      glLoadIdentity();
+      gluOrtho2D(xTile, xTile + wTile, yTile, yTile + hTile);
+
+      // Set the model view matrix
+      glMatrixMode(GL_MODELVIEW);
+      glPushMatrix();
+      glLoadIdentity();
+
+      // Draw the triangles
+      glCallList(*dl);
+
+      // Figure out the size of the data chunk to copy
+      unsigned int wCopy = width - xTile < wTile ? width - xTile : wTile;
+      unsigned int hCopy = height - yTile < hTile ? height - yTile : hTile;
+      
+      // Set up the copy so that the strides are correct
+      glPixelStorei(GL_PACK_ALIGNMENT, 1);
+      glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+      glPixelStorei(GL_PACK_ROW_LENGTH, width);
+      glPixelStorei(GL_PACK_SKIP_PIXELS, xTile);
+      glPixelStorei(GL_PACK_SKIP_ROWS, yTile);
+
+      // Copy the pixels to the buffer
+      glReadPixels(0, 0, wCopy, hCopy, GL_RED, glType, buffer);
+
+      // Restore the GL state
+      glPopMatrix();
+      glMatrixMode(GL_PROJECTION);
+      glPopMatrix();
+      }
+    }
+}
+
+void 
+PolygonScanConvertBase
+::Rasterize( double *vArray, unsigned int nVertices, bool filled, 
+             unsigned int width, unsigned int height, GLenum glType, void *buffer )
+{
+  // Push the GL attributes to preserve everything
+  glPushAttrib(GL_ALL_ATTRIB_BITS);
+
+  // Tesselate the polygon and save the tesselation as a display list
+  GLint dl = glGenLists(1);
+  glNewList(dl, GL_COMPILE);
+
+  // Set the background to black
+  glClearColor(0,0,0,1);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+  // Paint in white
+  glColor3d(1.0, 1.0, 1.0);
+
+  // Add points for raterization to display list
+  if ( filled )
+    GetPointsForFilledPoly( vArray, nVertices );
+
+  if ( !filled )
+    GetPointsForUnfilledPoly( vArray, nVertices );
+
+  // End the display list
+  glEndList();
+
+  // Draw rasterized points
+  DrawRasterized( width, height, glType, buffer, &dl );
+
+  // Get rid of the display list
+  glDeleteLists(dl,1);
+
+  // Restore the GL state
+  glPopAttrib();
+}
+
+void PolygonScanConvertBase
+::ErrorCallback( GLenum errorCode )
+{ 
+  std::cerr << "Tesselation Error: " << gluErrorString(errorCode) << std::endl; 
+}
+
+void PolygonScanConvertBase
+::CombineCallback( GLdouble coords[3], GLdouble **vertex_data, GLfloat *weight, GLdouble **dataOut ) 
+{
+  GLdouble *vertex = new GLdouble[3];
+  vertex[0] = coords[0]; vertex[1] = coords[1]; vertex[2] = coords[2];
+  *dataOut = vertex;
+}
+
